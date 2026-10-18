@@ -866,6 +866,51 @@ def test_discriminated_unions_invalid_data_uses_cache() -> None:
     assert DISCRIMINATOR_CACHE.get(UnionType) is discriminator
 
 
+def test_discriminated_unions_incomplete_mapping_is_not_cached() -> None:
+    class A(BaseModel):
+        type: Literal["a"]
+
+        data: str
+
+    class B(BaseModel):
+        type: Literal["b"]
+
+        data: int
+
+    UnionType = cast(Any, Union[A, B])
+    annotated = cast(Any, Annotated[UnionType, PropertyInfo(discriminator="type")])
+
+    assert not DISCRIMINATOR_CACHE.get(UnionType)
+
+    # Stand in for the race: a model whose deferred Pydantic build has not
+    # finished exposes a schema that is not a model schema yet, so its
+    # discriminator cannot be read. The mapping would be incomplete, and caching
+    # it would leave this union decoding to the wrong variant for the rest of the
+    # process.
+    real_schema = B.__pydantic_core_schema__
+    try:
+        B.__pydantic_core_schema__ = {"type": "definition-ref"}  # type: ignore[assignment]
+
+        m = construct_type(value={"type": "a", "data": "foo"}, type_=annotated)
+        assert isinstance(m, A)
+
+        assert DISCRIMINATOR_CACHE.get(UnionType) is None, (
+            "an incomplete discriminator mapping must not be cached"
+        )
+    finally:
+        B.__pydantic_core_schema__ = real_schema  # type: ignore[assignment]
+
+    # With every schema readable, the complete mapping is cached and reused.
+    construct_type(value={"type": "b", "data": "x"}, type_=annotated)
+    details = DISCRIMINATOR_CACHE.get(UnionType)
+    assert details is not None
+    assert set(details.mapping) == {"a", "b"}
+
+    cached = DISCRIMINATOR_CACHE.get(UnionType)
+    construct_type(value={"type": "b", "data": "x"}, type_=annotated)
+    assert DISCRIMINATOR_CACHE.get(UnionType) is cached
+
+
 @pytest.mark.skipif(PYDANTIC_V1, reason="TypeAliasType is not supported in Pydantic v1")
 def test_type_alias_type() -> None:
     Alias = TypeAliasType("Alias", str)  # pyright: ignore
